@@ -1,0 +1,320 @@
+\documentclass[conference,a4paper]{IEEEtran}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{tikz}
+\usetikzlibrary{arrows.meta,positioning}
+\usepackage{booktabs}
+\usepackage{hyperref}
+\usepackage{placeins}
+
+\lstdefinelanguage{JavaScript}{
+  keywords={function, return, const, let, var, new, await, async, if, else, throw, true, false, null, undefined, require, module, exports},
+  keywordstyle=\color{blue}\bfseries,
+  comment=[l]{//},
+  commentstyle=\color{gray}\itshape,
+  string=[b]',
+  stringstyle=\color{teal},
+  morestring=[b]",
+  sensitive=true
+}
+\lstset{
+  language=JavaScript,
+  basicstyle=\ttfamily\scriptsize,
+  breaklines=true,
+  frame=single,
+  numbers=left,
+  numberstyle=\tiny\color{gray},
+  columns=flexible,
+  tabsize=2,
+  captionpos=b
+}
+
+\begin{document}
+
+\title{Callbacks, promesas y async/await: an\'alisis comparativo del modelo de ejecuci\'on de JavaScript sobre un simulador de eventos temporizados}
+
+\author{
+\IEEEauthorblockN{Juan Sebasti\'an Garc\'ia Valderrama}
+\IEEEauthorblockA{Facultad de Ingenier\'ia\\ Universidad de San Buenaventura\\ Bogot\'a, Colombia}
+\and
+\IEEEauthorblockN{John Alejandro Martin Galvis}
+\IEEEauthorblockA{Facultad de Ingenier\'ia\\ Universidad de San Buenaventura\\ Bogot\'a, Colombia}
+\and
+\IEEEauthorblockN{Gabriela Rodr\'iguez Lara}
+\IEEEauthorblockA{Facultad de Ingenier\'ia\\ Universidad de San Buenaventura\\ Bogot\'a, Colombia}
+}
+
+\maketitle
+
+\begin{abstract}
+Este informe documenta el desarrollo del laboratorio ``Javascript Avanzado'', cuyo objetivo es evaluar la capacidad de razonar sobre el modelo de ejecuci\'on de JavaScript (pila de llamadas, cola de macrotareas y cola de microtareas) a trav\'es de un simulador de ocho avisos temporizados, implementado de tres formas equivalentes: callbacks anidados, promesas encadenadas y async/await. Se comparan t\'ecnicamente los tres estilos, se predice y reconcilia el orden de ejecuci\'on observado, se procesa el arreglo de resultados con m\'etodos funcionales (\texttt{reduce}, \texttt{filter}, \texttt{map} y \texttt{find}), y se dise\~na un caso l\'imite propio -una lectura corrupta de un sensor que entrega un objeto \texttt{Error} sin que nada en la cadena lo valide- para poner a prueba el modelo de ejecuci\'on y el procesamiento funcional bajo datos inv\'alidos. Los resultados muestran que el encadenamiento secuencial fuerza un orden de llegada id\'entico e independiente de los retrasos individuales, a costa de una latencia acumulada creciente, y que ninguno de los tres estilos as\'incronos protege por s\'i solo contra una promesa que se resuelve ``exitosamente'' con un valor inv\'alido.
+\end{abstract}
+
+\begin{IEEEkeywords}
+JavaScript, bucle de eventos, promesas, async/await, programaci\'on as\'incrona, pila de llamadas, cola de macrotareas, cola de microtareas, m\'etodos funcionales de arreglos.
+\end{IEEEkeywords}
+
+\section{Introducci\'on}
+El presente laboratorio, propuesto por el docente Ing. Sergio Alberto Reyes G\'omez en la asignatura de JavaScript Avanzado de la Facultad de Ingenier\'ia de la Universidad de San Buenaventura, tiene como objetivo evaluar la capacidad del estudiante para razonar sobre el modelo de ejecuci\'on de JavaScript, estructurar informaci\'on mediante objetos y procesar colecciones de datos con m\'etodos funcionales de arreglos, m\'as all\'a de la simple escritura de c\'odigo funcional \cite{lab_enunciado}.
+
+Para ello se construy\'o un simulador que ``dispara'' ocho avisos, cada uno con un tiempo de espera distinto, y que se implement\'o de tres formas sint\'acticamente distintas pero sem\'anticamente equivalentes: callbacks anidados, promesas encadenadas y \texttt{async}/\texttt{await}. Sobre el arreglo de resultados de cada implementaci\'on se aplicaron cuatro operaciones funcionales, y finalmente se dise\~n\'o un caso l\'imite propio para poner a prueba tanto el modelo de ejecuci\'on como el procesamiento funcional bajo una condici\'on de datos inv\'alidos no contemplada en el enunciado original.
+
+Este documento sigue el hilo de los seis pasos del laboratorio: dise\~no del simulador (Secci\'on \ref{sec:diseno}), comparaci\'on t\'ecnica de los tres estilos (Secci\'on \ref{sec:comparacion}), predicci\'on y reconciliaci\'on del orden de ejecuci\'on (Secci\'on \ref{sec:prediccion}), procesamiento funcional del arreglo de resultados (Secci\'on \ref{sec:procesamiento}), dise\~no y explicaci\'on del caso l\'imite (Secci\'on \ref{sec:casolimite}), y el diagrama del modelo de ejecuci\'on correspondiente a dicho caso l\'imite (Secci\'on \ref{sec:diagrama}).
+
+\section{Dise\~no del simulador}
+\label{sec:diseno}
+Cada uno de los ocho avisos se representa como un objeto con cuatro atributos m\'inimos: \texttt{eventName} (identificador), \texttt{eventType} (categor\'ia), \texttt{scheduledTime} (instante en que se program\'o que apareciera, calculado como una marca de referencia \texttt{refTime} capturada una \'unica vez al inicio del programa, m\'as un retraso propio de cada evento) y \texttt{realTime} (instante en que efectivamente se resolvi\'o, obtenido con \texttt{Date.now()}). El Listado \ref{lst:eventone} muestra la definici\'on de \texttt{eventOne} en su forma basada en promesas; las siete funciones restantes siguen exactamente el mismo patr\'on, cambiando \'unicamente el nombre, la categor\'ia y el retraso.
+
+\begin{lstlisting}[language=JavaScript, caption={Patr\'on de definici\'on de un evento (AsyncImpl.js).}, label={lst:eventone}]
+const EVENT_DELAYS_MS = {
+  EVENT_ONE: 480,
+  // ... EVENT_TWO .. EVENT_EIGHT
+};
+
+function eventOne() {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      resolve({
+        eventName: 'eventOne',
+        eventType: 'aviso largo',
+        scheduledTime: refTime + EVENT_DELAYS_MS.EVENT_ONE,
+        realTime: Date.now(),
+      });
+    }, EVENT_DELAYS_MS.EVENT_ONE);
+  });
+}
+\end{lstlisting}
+
+Los ocho retrasos elegidos (480, 650, 260, 220, 720, 400, 180 y 560~ms para \texttt{eventOne} a \texttt{eventEight}, respectivamente) se escogieron deliberadamente sin un orden ascendente: en particular, el retraso de \texttt{eventThree} (260~ms) es menor que el de \texttt{eventTwo} (650~ms), lo que introduce a prop\'osito una inversi\'on que la Secci\'on \ref{sec:procesamiento} explota para ejercitar el m\'etodo \texttt{find}. Tras la retroalimentaci\'on entre los tres integrantes del grupo, estos ocho valores se extrajeron a un objeto de constantes con nombre, \texttt{EVENT\_DELAYS\_MS}, en cada uno de los seis archivos que los usa: los valores num\'ericos en s\'i no cambiaron, pero dejaron de aparecer como literales sueltos (``n\'umeros m\'agicos'') dentro de cada \texttt{setTimeout}, lo que mejora la trazabilidad de d\'onde se define cada retraso y evita tener que modificarlo en dos lugares distintos (el \texttt{scheduledTime} y el propio \texttt{setTimeout}) si se decidiera cambiarlo.
+
+Con el fin de no duplicar innecesariamente la l\'ogica de an\'alisis entre las tres implementaciones -algo que la l\'ogica de negocio no diferencia entre estilos, a diferencia de la orquestaci\'on de los propios eventos, que s\'i es el objeto de comparaci\'on-, el post-procesamiento del Paso 4 (\texttt{reduce}, \texttt{filter}+\texttt{map} y \texttt{find}) se extrajo a un \'unico m\'odulo, \texttt{ProcessResults.js}, que las tres implementaciones importan y ejecutan sobre su propia bit\'acora al finalizar. Las ocho funciones de evento, en cambio, s\'i se mantienen duplicadas en cada archivo: ah\'i reside precisamente la diferencia sint\'actica que el laboratorio pide comparar.
+
+\section{Comparaci\'on t\'ecnica de los tres estilos}
+\label{sec:comparacion}
+
+\subsection{Manejo de errores}
+En \textbf{callbacks anidados}, no existe un mecanismo del lenguaje que propague autom\'aticamente un error entre niveles: cada funci\'on recibe lo que sea que el nivel anterior le haya pasado a su callback, sin distinguir sint\'acticamente entre un dato v\'alido y uno inv\'alido, y \texttt{CallbackImpl.js} no incorpora ning\'un mecanismo adicional para ello, precisamente porque el estilo no ofrece un punto \'unico donde centralizarlo. En \textbf{promesas encadenadas}, s\'i existe ese punto \'unico: tras la revisi\'on del grupo, \texttt{PromiseImpl.js} incorpor\'o un \texttt{.catch()} al final de toda la cadena, que efectivamente intercepta cualquier \texttt{reject(...)} o excepci\'on s\'incrona lanzada dentro de alg\'un \textit{executor}. En \textbf{async/await}, \texttt{AsyncImpl.js} incorpor\'o de forma an\'aloga un \texttt{try/catch} que envuelve las ocho llamadas a \texttt{await}. Ambas adiciones son mejoras genuinas -antes no exist\'ia ning\'un manejo expl\'icito de errores en ninguna de las tres implementaciones- pero comparten la misma limitaci\'on estructural: solo se activan si alg\'un esl\'abon efectivamente \emph{rechaza} su promesa. El caso l\'imite de la Secci\'on \ref{sec:casolimite} pone precisamente esa limitaci\'on a prueba sobre el c\'odigo ya corregido: al resolver una promesa con un objeto \texttt{Error} en lugar de rechazarla, ni el nuevo \texttt{.catch()} de \texttt{PromiseImpl.limitCase.js} ni el nuevo \texttt{try/catch} de \texttt{AsyncImpl.limitCase.js} llegan a activarse, porque desde la perspectiva del motor de promesas la operaci\'on termin\'o exitosamente. Es decir, agregar manejo de errores convencional fue una mejora necesaria para los errores que s\'i se propagan como rechazo, pero no basta, por s\'i sola, contra los que no.
+
+\subsection{Legibilidad del orden de ejecuci\'on}
+En callbacks anidados, el orden de ejecuci\'on coincide con el orden de anidaci\'on visual del c\'odigo: nuestra implementaci\'on en \texttt{CallbackImpl.js} llega a nueve niveles de indentaci\'on para los ocho eventos, un s\'intoma reconocible de lo que la comunidad llama \textit{pyramid of doom}, sin importar qu\'e tan descriptivos sean los nombres de las variables. En promesas encadenadas, el orden se aplana en una lista de llamadas a \texttt{.then()}, m\'as f\'acil de seguir que el anidamiento; en la versi\'on revisada, adem\'as, cada par\'ametro de callback pas\'o de un nombre corto (\texttt{e1}, \texttt{e2}, \dots) a uno descriptivo (\texttt{eventOneResult}, \texttt{eventTwoResult}, \dots), lo que elimina la necesidad de rastrear qu\'e representa cada uno consultando el eslab\'on anterior. En async/await, la secuencia se lee de arriba hacia abajo como c\'odigo s\'incrono ordinario -ocho l\'ineas casi id\'enticas de \texttt{register.push(await eventN())}-, siendo la forma m\'as legible de las tres para expresar una secuencia estrictamente ordenada como la de este simulador.
+
+\subsection{Recomendaci\'on t\'ecnica}
+Para el desarrollo de backend con enfoque as\'incrono recomendamos \texttt{async/await} como estilo por defecto: combina la legibilidad de c\'odigo s\'incrono con \texttt{try/catch} nativo para el manejo de errores, sin sacrificar nada del modelo de promesas subyacente (de hecho, \texttt{await} es az\'ucar sint\'actico sobre \texttt{.then()} \cite{mdn_promise}). Las promesas encadenadas siguen siendo \'utiles cuando la secuencia de pasos se construye din\'amicamente en tiempo de ejecuci\'on (por ejemplo, a partir de un arreglo de tareas cuyo tama\~no no se conoce de antemano), un escenario donde la sintaxis lineal de \texttt{await} no siempre es la m\'as natural. Los callbacks anidados, por \'ultimo, consideramos que deben reservarse a un rol pedag\'ogico -entender el mecanismo subyacente- m\'as que a c\'odigo de producci\'on.
+
+\section{Predicci\'on y reconciliaci\'on}
+\label{sec:prediccion}
+\textbf{Predicci\'on (antes de ejecutar).} A pesar de que los ocho eventos tienen retrasos distintos y no ordenados (Secci\'on \ref{sec:diseno}), predijimos que la bit\'acora final de las tres implementaciones mostrar\'ia siempre los eventos en el orden de declaraci\'on (\texttt{eventOne} a \texttt{eventEight}), nunca ordenados por magnitud de retraso. La raz\'on es que en las tres implementaciones cada evento s\'olo se invoca -y por lo tanto su \texttt{setTimeout} s\'olo se registra en la cola de macrotareas- una vez que el evento anterior ya se resolvi\'o: nunca hay dos temporizadores compitiendo simult\'aneamente en la cola de macrotareas, as\'i que no puede haber una carrera que reordene la llegada. Tambi\'en predijimos que \texttt{eventThree} ser\'ia detectado como el primer evento ``fuera de orden'' por el algoritmo de la Secci\'on \ref{sec:procesamiento}, dado que su \texttt{scheduledTime} (260~ms de retraso) es menor que el de \texttt{eventTwo} (650~ms), que lo precede en la bit\'acora. Finalmente, predijimos que la latencia observada (\texttt{realTime - scheduledTime}) crecer\'ia mon\'otonamente evento a evento, porque el instante real de cada evento acumula la \emph{suma} de todos los retrasos anteriores (al ser estrictamente secuenciales), mientras que su \texttt{scheduledTime} s\'olo refleja su propio retraso individual sobre \texttt{refTime}.
+
+\textbf{Reconciliaci\'on (despu\'es de ejecutar).} La Tabla \ref{tab:latencias} resume una ejecuci\'on real de \texttt{AsyncImpl.js}, ya con las constantes \texttt{EVENT\_DELAYS\_MS} y el \texttt{try/catch} incorporados por el grupo (los resultados de \texttt{CallbackImpl.js} y \texttt{PromiseImpl.js} son cualitativamente id\'enticos, y los ocho retrasos en s\'i no cambiaron respecto a la versi\'on anterior). Los tres archivos confirmaron el orden de declaraci\'on sin excepci\'on, confirmaron a \texttt{eventThree} como el primer evento fuera de orden, y confirmaron el crecimiento mon\'otono de la latencia: de 1~ms en \texttt{eventOne} a 2918~ms en \texttt{eventEight}. El resultado coincidi\'o exactamente con lo predicho; no hubo desajuste que explicar.
+
+\begin{table}[t]
+\centering
+\caption{Retraso programado y latencia observada por evento (ejecuci\'on real de \texttt{AsyncImpl.js}).}
+\label{tab:latencias}
+\begin{tabular}{lccc}
+\toprule
+Evento & Retraso (ms) & scheduledTime & Latencia (ms) \\
+       &              & (offset)      & (realTime$-$scheduledTime) \\
+\midrule
+eventOne   & 480 & 480 & 1 \\
+eventTwo   & 650 & 650 & 482 \\
+eventThree & 260 & 260 & 1133 \\
+eventFour  & 220 & 220 & 1394 \\
+eventFive  & 720 & 720 & 1615 \\
+eventSix   & 400 & 400 & 2336 \\
+eventSeven & 180 & 180 & 2737 \\
+eventEight & 560 & 560 & 2918 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\section{Procesamiento funcional del arreglo de resultados}
+\label{sec:procesamiento}
+El Listado \ref{lst:procesar} muestra las tres operaciones sobre la bit\'acora (\texttt{register}), tal como quedaron implementadas en \texttt{ProcessResults.js} (renombrado de \texttt{procesarResultados.js} durante la revisi\'on del grupo, junto con sus variables internas, para mantener el c\'odigo consistentemente en ingl\'es).
+
+\begin{lstlisting}[language=JavaScript, caption={Post-procesamiento funcional compartido (ProcessResults.js, resumido).}, label={lst:procesar}]
+const totalLatency = register.reduce(
+  (accum, current) =>
+    accum + (current.realTime - current.scheduledTime),
+  0
+);
+const averageLatency = totalLatency / register.length;
+
+const deviationEventIds = register
+  .filter(e => (e.realTime - e.scheduledTime) > 100)
+  .map(e => e.eventName);
+
+let maxScheduledSoFar = -Infinity;
+const firstOutOfOrderEvent = register.find((e) => {
+  if (e.scheduledTime < maxScheduledSoFar) return true;
+  maxScheduledSoFar = Math.max(maxScheduledSoFar, e.scheduledTime);
+  return false;
+});
+\end{lstlisting}
+
+\textbf{Latencia promedio (\texttt{reduce}).} La ejecuci\'on report\'o una latencia promedio de 1577~ms. Este n\'umero no es un promedio de los retrasos que elegimos (que promedian 434~ms): es el promedio de \emph{cu\'anto tard\'o de m\'as} cada evento en llegar respecto a su propia marca individual, y como se explic\'o en la Secci\'on \ref{sec:prediccion}, ese exceso crece con cada evento porque el encadenamiento secuencial obliga a que cada uno espere a que termine el anterior. En otras palabras, la latencia promedio mide el costo de haber encadenado ocho esperas una detr\'as de otra en lugar de dispararlas en paralelo, no la duraci\'on de ninguna espera individual.
+
+\textbf{Identificadores con desviaci\'on (\texttt{filter}+\texttt{map}).} Con un umbral de 100~ms, definido por nosotros por ser lo suficientemente peque\~no para capturar cualquier evento afectado por la acumulaci\'on secuencial, el resultado fue \texttt{[eventTwo, eventThree, eventFour, eventFive, eventSix, eventSeven, eventEight]}: los siete eventos posteriores al primero. S\'olo \texttt{eventOne} queda fuera, porque al ser el primero en dispararse, su \texttt{realTime} coincide casi exactamente con su \texttt{scheduledTime} (diferencia de 1~ms en la Tabla \ref{tab:latencias}).
+
+\textbf{Primer evento fuera de orden (\texttt{find}).} El resultado fue \texttt{eventThree}, tal como se predijo en la Secci\'on \ref{sec:prediccion}.
+
+\textbf{Justificaci\'on de los m\'etodos elegidos.} \texttt{forEach} se descart\'o para las tres operaciones porque siempre retorna \texttt{undefined}: usarlo habr\'ia obligado a mutar una variable externa al callback para acumular cualquier resultado, un efecto colateral innecesario cuando lo que se necesita es un valor derivado del arreglo. \texttt{reduce} es la elecci\'on correcta quando el objetivo es condensar todo el arreglo en un \'unico valor acumulado (la suma de latencias) sin mutar nada fuera de su propio callback. \texttt{filter} es la elecci\'on correcta para \emph{seleccionar} un subconjunto sin transformar cada elemento, mientras que \texttt{map} es la elecci\'on correcta para \emph{transformar} cada elemento del subconjunto ya filtrado en el dato que realmente interesa reportar (el identificador, no el objeto completo). Ninguno de los dos muta el arreglo original: ambos retornan arreglos nuevos, lo cual es deseable cuando \texttt{register} debe seguir siendo la \'unica fuente de verdad durante todo el an\'alisis. Por \'ultimo, \texttt{find} -y no \texttt{filter}- es la elecci\'on correcta para el tercer requerimiento porque el enunciado pide expl\'icitamente \emph{el primer} evento fuera de orden, no todos los que califiquen; \texttt{find} se detiene apenas encuentra ese elemento, mientras que \texttt{filter} habr\'ia recorrido el arreglo completo para devolver una lista que no fue lo que se pidi\'o.
+
+\section{Dise\~no y explicaci\'on del caso l\'imite}
+\label{sec:casolimite}
+
+\subsection{Dise\~no y justificaci\'on}
+El caso l\'imite propio, al que llamamos \emph{lectura corrupta del sensor}, agrega un noveno aviso (\texttt{eventNine}, renombrado de \texttt{eventoNueve} durante la revisi\'on del grupo) justo despu\'es de \texttt{eventThree}. A diferencia de los ejemplos sugeridos en el enunciado (timestamps id\'enticos, una excepci\'on no capturada dentro de un \texttt{.then}, o un \texttt{await} sobre una promesa que nunca resuelve), nuestro caso combina dos observaciones propias: primero, que envolver una operaci\'on en \texttt{new Promise(...)} no garantiza que el valor con el que se resuelve tenga la forma esperada; y segundo, que \texttt{resolve(...)} no valida en absoluto el tipo del valor que recibe. El Listado \ref{lst:eventonueve} muestra su definici\'on.
+
+\begin{lstlisting}[language=JavaScript, caption={Evento l\'imite: resuelve con un \texttt{Error} en lugar de rechazar (PromiseImpl.limitCase.js).}, label={lst:eventonueve}]
+function eventNine() {
+  return new Promise((resolve) => {
+    setTimeout(() => {
+      resolve(new Error(
+        'eventoNueve: no se pudo confirmar ' +
+        'la lectura del sensor'
+      ));
+    }, EVENT_DELAYS_MS.EVENT_NINE);
+  });
+}
+\end{lstlisting}
+
+En la cadena de consumo (Listado \ref{lst:sinvalidar}), a prop\'osito \emph{no} se valida si el valor recibido es una instancia de \texttt{Error} antes de insertarlo en la bit\'acora, para observar qu\'e hace el modelo de ejecuci\'on -y, en cascada, el procesamiento funcional de la Secci\'on \ref{sec:procesamiento}- cuando nadie se detiene a comprobar la forma de un dato as\'incrono. Esto se mantuvo as\'i deliberadamente incluso despu\'es de que \texttt{AsyncImpl.js} incorporara el \texttt{try/catch} descrito en la Secci\'on \ref{sec:comparacion}: como se ver\'a en la Secci\'on \ref{sec:casolimite}-C, ese \texttt{try/catch} tambi\'en envuelve a \texttt{eventNine()} en \texttt{AsyncImpl.limitCase.js}, y aun as\'i no intercepta nada.
+
+\begin{lstlisting}[language=JavaScript, caption={Consumo sin validar, ya dentro del bloque try incorporado por el grupo (AsyncImpl.limitCase.js).}, label={lst:sinvalidar}]
+try {
+  // ...
+  register.push(await eventNine()); // sin validar
+  register.push(await eventFour());
+  // ...
+  processResults(register);
+} catch (error) {
+  console.error('Error durante la ejecucion de eventos:', error);
+}
+\end{lstlisting}
+
+Consideramos que este caso no es trivial porque, a diferencia de un \texttt{throw} sin capturar -que detiene la ejecuci\'on de forma ruidosa y evidente-, este produce una corrupci\'on \emph{silenciosa}: el programa termina normalmente, sin ninguna excepci\'on visible y sin entrar jam\'as al bloque \texttt{catch}, pero con un dato inv\'alido incrustado en el resultado final.
+
+\subsection{Predicci\'on (antes de ejecutar)}
+Predijimos que la bit\'acora final tendr\'ia longitud 9, con el objeto \texttt{Error} en la posici\'on 3 (\'indice base 0). Sobre el procesamiento del Paso 4, predijimos que \texttt{reduce} devolver\'ia \texttt{NaN}, porque \texttt{current.realTime} y \texttt{current.scheduledTime} son \texttt{undefined} en un objeto \texttt{Error}, y \texttt{undefined - undefined} eval\'ua a \texttt{NaN}; una vez que el acumulador de \texttt{reduce} se contamina con \texttt{NaN}, permanece as\'i para siempre porque \texttt{NaN} sumado a cualquier n\'umero sigue siendo \texttt{NaN}. Predijimos que \texttt{filter}+\texttt{map} excluir\'ia el \texttt{Error} sin lanzar ninguna excepci\'on, porque la comparaci\'on \texttt{NaN > 100} eval\'ua siempre a \texttt{false}. Y predijimos que \texttt{find} no se ver\'ia afectado, porque ya encuentra a \texttt{eventThree} -en la posici\'on 2- antes de llegar al \texttt{Error} en la posici\'on 3, y \texttt{find} se detiene en el primer acierto.
+
+\subsection{Ejecuci\'on y reconciliaci\'on}
+Los tres estilos (callbacks, promesas y async/await) reprodujeron exactamente el comportamiento predicho. La bit\'acora final tuvo longitud 9 en los tres casos, con el objeto \texttt{Error} en la posici\'on 3 -al imprimirlo, Node.js mostr\'o incluso su traza de pila completa, confirmando que se trata de una instancia real de \texttt{Error} y no de un objeto con esa apariencia-. La latencia promedio report\'o \texttt{NaN} en los tres archivos. La lista de identificadores con desviaci\'on excluy\'o al \texttt{Error} en silencio, devolviendo exactamente los mismos siete eventos que en la Tabla \ref{tab:latencias}. Y \texttt{find} sigui\'o devolviendo a \texttt{eventThree}, sin ning\'un cambio respecto al Paso 4 sin el caso l\'imite.
+
+Adicionalmente, y esto es lo que este caso l\'imite pon\'ia a prueba de forma m\'as espec\'ifica sobre la versi\'on revisada del c\'odigo: ni el \texttt{.catch()} de \texttt{PromiseImpl.limitCase.js} ni el \texttt{try/catch} de \texttt{AsyncImpl.limitCase.js} se activaron en ninguna ejecuci\'on. La consola nunca mostr\'o el mensaje \texttt{'Error durante la ejecuci\'on...'} que ambos manejadores imprimen; en su lugar, \texttt{processResults(register)} corri\'o con total normalidad dentro del mismo bloque \texttt{try}, sobre un arreglo que ya conten\'ia el \texttt{Error} sin detectar. Esto confirma, con c\'odigo defensivo real y no solo en teor\'ia, que agregar manejo de errores convencional no es suficiente contra este tipo de falla.
+
+\subsection{Explicaci\'on causal}
+El resultado se explica enteramente por c\'omo JavaScript trata el tipo de un valor de cumplimiento de una promesa: \texttt{resolve(valor)} acepta cualquier \texttt{valor}, sin restricci\'on de forma ni de tipo \cite{ecma_promise}. Ni la cadena de promesas, ni \texttt{async/await}, ni los callbacks anidados verifican en ning\'un punto que ese valor tenga las propiedades \texttt{eventName}, \texttt{eventType}, \texttt{scheduledTime} y \texttt{realTime} que el resto del programa asume: simplemente lo entregan, tal cual, a quien haya escrito la continuaci\'on. La corrupci\'on se refleja en el arreglo de objetos-evento como un elemento de un tipo distinto al resto -un \texttt{Error} en lugar de un objeto plano- insertado exactamente en la posici\'on donde \texttt{eventNine} fue invocado, sin desplazar ni omitir a ning\'un otro evento.
+
+Su reflejo en el procesamiento del Paso 4 var\'ia por operaci\'on, y esa variaci\'on es en s\'i misma la lecci\'on m\'as importante del caso: \texttt{reduce} propaga el da\~no globalmente porque acumula un \'unico valor num\'erico y \texttt{NaN} es contagioso en aritm\'etica; \texttt{filter} lo excluye de forma benigna porque toda comparaci\'on relacional contra \texttt{NaN} (o contra \texttt{undefined}, que se convierte a \texttt{NaN} al operar num\'ericamente) eval\'ua a \texttt{false}; y \texttt{find} result\'o inmune \'unicamente por la posici\'on relativa de los elementos -encontr\'o su respuesta antes de llegar al dato corrupto-, no porque el algoritmo est\'e protegido: si \texttt{eventNine} se hubiera colocado antes de \texttt{eventThree} en la secuencia, \texttt{maxScheduledSoFar} se habr\'ia contaminado con \texttt{NaN} en el mismo paso (\texttt{Math.max} con un \texttt{undefined} entre sus argumentos devuelve \texttt{NaN}), y ninguna comparaci\'on posterior habr\'ia podido volver a marcar un evento como fuera de orden. En ambos escenarios, el programa nunca lanza una excepci\'on ni se detiene: produce silenciosamente una respuesta incorrecta, que es precisamente el tipo de falla m\'as dif\'icil de detectar en un sistema en producci\'on.
+
+\section{Diagrama del modelo de ejecuci\'on}
+\label{sec:diagrama}
+La Figura \ref{fig:diagrama} traza, paso a paso, la pila de ejecuci\'on, la cola de microtareas y la cola de macrotareas de \texttt{AsyncImpl.limitCase.js} durante el segmento cr\'itico del caso l\'imite: desde que se dispara el temporizador de \texttt{eventThree} hasta que \texttt{processResults()} corre sobre el arreglo ya corrompido. Se eligi\'o la versi\'on \texttt{async/await} porque \texttt{await} es sem\'anticamente equivalente a encadenar \texttt{.then()} \cite{ecma_async}, por lo que el mismo diagrama describe igualmente el comportamiento de \texttt{PromiseImpl.limitCase.js}. El diagrama tambi\'en deja ver por qu\'e el \texttt{try/catch} agregado en la revisi\'on del grupo (Secci\'on \ref{sec:comparacion}) no cambia en nada esta traza: como se ve en T2, T4 y T6, todo el segmento ocurre \emph{dentro} del bloque \texttt{try} (l\'ineas 124-143), pero ninguno de sus pasos lanza una excepci\'on que ese bloque pueda interceptar.
+
+Cada columna T$n$ representa un turno completo del bucle de eventos: o bien la ejecuci\'on de una macrotarea (un callback de \texttt{setTimeout} ya vencido), o bien el drenado de una microtarea (la continuaci\'on de un \texttt{await}). La cola de microtareas aparece vac\'ia en las seis columnas porque, en este simulador, cada microtarea generada se ejecuta de inmediato -antes de que se tome la siguiente instant\'anea-, nunca se acumula m\'as de una en espera.
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  every node/.style={font=\scriptsize},
+  cell/.style={draw, rounded corners=2pt, minimum height=1.55cm, text width=2.3cm, align=left, inner sep=3pt, anchor=north west},
+  headcell/.style={draw, rounded corners=2pt, minimum height=0.85cm, text width=2.3cm, align=center, fill=black!8, inner sep=3pt, anchor=north west},
+  lbl/.style={font=\scriptsize\bfseries, align=right, text width=1.8cm, anchor=north west}
+]
+% --- column x positions ---
+\def\xLabel{0}
+\def\xT{2.15}
+\def\xTa{2.15}
+\def\xTb{4.85}
+\def\xTc{7.55}
+\def\xTd{10.25}
+\def\xTe{12.95}
+\def\xTf{15.15}
+\def\colw{2.55}
+
+% --- row y positions ---
+\def\yHead{0}
+\def\yPila{-1.05}
+\def\yMicro{-2.85}
+\def\yMacro{-4.65}
+
+% header row
+\node[headcell, minimum width=\colw cm] at (\xTa,\yHead) {T1\\ \scriptsize temporizador eventThree};
+\node[headcell, minimum width=\colw cm] at (\xTb,\yHead) {T2\\ \scriptsize reanuda runEvents};
+\node[headcell, minimum width=\colw cm] at (\xTc,\yHead) {T3\\ \scriptsize temporizador eventNine};
+\node[headcell, minimum width=\colw cm] at (\xTd,\yHead) {T4\\ \scriptsize reanuda runEvents};
+\node[headcell, minimum width=2.0cm, dashed] at (\xTe,\yHead) {T5\\ \scriptsize $\times 4$ repite};
+\node[headcell, minimum width=\colw cm] at (\xTf,\yHead) {T6\\ \scriptsize processResults()};
+
+% row labels
+\node[lbl] at (\xLabel,\yPila) {Pila de ejecuci\'on};
+\node[lbl] at (\xLabel,\yMicro) {Cola de microtareas};
+\node[lbl] at (\xLabel,\yMacro) {Cola de macrotareas};
+
+% --- Pila row ---
+\node[cell, minimum width=\colw cm] at (\xTa,\yPila) {cb setTimeout eventThree (L48) $\to$ resolve(\{...\})};
+\node[cell, minimum width=\colw cm] at (\xTb,\yPila) {push(e3) L127; llama eventNine() L132; setTimeout L61 (dentro del try, L124)};
+\node[cell, minimum width=\colw cm] at (\xTc,\yPila) {cb setTimeout eventNine (L61) $\to$ resolve(new Error(...)) L62};
+\node[cell, minimum width=\colw cm] at (\xTd,\yPila) {push(e9) L132 \textbf{sin validar}; llama eventFour() L134; setTimeout L69};
+\node[cell, minimum width=2.0cm, dashed] at (\xTe,\yPila) {mismo patr\'on, L134-L138 (eventFour..eventEight)};
+\node[cell, minimum width=\colw cm] at (\xTf,\yPila) {push(e8); processResults() L140 $\to$ reduce, filter+map, find};
+
+% --- Microtareas row ---
+\node[cell, minimum width=\colw cm] at (\xTa,\yMicro) {--};
+\node[cell, minimum width=\colw cm] at (\xTb,\yMicro) {--};
+\node[cell, minimum width=\colw cm] at (\xTc,\yMicro) {--};
+\node[cell, minimum width=\colw cm] at (\xTd,\yMicro) {--};
+\node[cell, minimum width=2.0cm, dashed] at (\xTe,\yMicro) {--};
+\node[cell, minimum width=\colw cm] at (\xTf,\yMicro) {--};
+
+% --- Macrotareas row ---
+\node[cell, minimum width=\colw cm] at (\xTa,\yMacro) {--};
+\node[cell, minimum width=\colw cm] at (\xTb,\yMacro) {timer eventNine pendiente (340 ms)};
+\node[cell, minimum width=\colw cm] at (\xTc,\yMacro) {--};
+\node[cell, minimum width=\colw cm] at (\xTd,\yMacro) {timer eventFour pendiente (220 ms)};
+\node[cell, minimum width=2.0cm, dashed] at (\xTe,\yMacro) {1 timer pendiente por turno};
+\node[cell, minimum width=\colw cm] at (\xTf,\yMacro) {--};
+
+\end{tikzpicture}
+\caption{Pila de ejecuci\'on, cola de microtareas y cola de macrotareas durante el caso l\'imite ``lectura corrupta del sensor'' (AsyncImpl.limitCase.js). Las referencias L\emph{n} indican el n\'umero de l\'inea del archivo fuente; todo el segmento T1-T6 transcurre dentro del bloque \texttt{try} agregado por el grupo (L124-143).}
+\label{fig:diagrama}
+\end{figure*}
+\FloatBarrier
+
+El punto cr\'itico del diagrama es T3: el mecanismo que ejecuta el callback del temporizador de \texttt{eventNine} es id\'entico, l\'inea por l\'inea del motor de JavaScript, al que ejecut\'o el de \texttt{eventThree} en T1. Ning\'un componente del modelo de ejecuci\'on -ni la pila, ni ninguna de las dos colas- distingue entre resolver con un objeto-evento v\'alido y resolver con un \texttt{Error}: esa distinci\'on s\'olo existe, o deber\'ia existir, en el c\'odigo de la aplicaci\'on, no en el bucle de eventos. Tampoco el bloque \texttt{try} que envuelve todo el segmento distingue nada aqu\'i: un \texttt{try/catch} solo reacciona ante una excepci\'on lanzada o una promesa rechazada, y en T1-T6 no ocurre ninguna de las dos cosas. La corrupci\'on permanece invisible para el modelo de ejecuci\'on hasta T6, donde \texttt{processResults()} corre de forma completamente s\'incrona -dentro de esa misma microtarea final, y todav\'ia dentro del \texttt{try}- sobre el arreglo completo, y es reci\'en ah\'i, al ejecutar \texttt{reduce}, donde el dato inv\'alido empieza a propagar \texttt{NaN}.
+
+\section{Conclusiones}
+El encadenamiento secuencial -presente por igual en callbacks anidados, promesas encadenadas y async/await- garantiza que el orden de llegada de los ocho eventos coincida siempre con el orden de declaraci\'on, sin importar la magnitud de sus retrasos individuales, porque nunca compite m\'as de un temporizador a la vez en la cola de macrotareas. Ese orden garantizado tiene un costo: la latencia observada crece de forma acumulada evento a evento, y la latencia promedio reportada por \texttt{reduce} termina midiendo ese costo de secuenciaci\'on, no la duraci\'on de ninguna espera individual.
+
+De los tres estilos comparados, \texttt{async/await} ofrece la mejor combinaci\'on de legibilidad y manejo de errores para c\'odigo de backend con enfoque as\'incrono, aunque ninguno de los tres protege, por s\'i solo, contra una promesa que se resuelve ``exitosamente'' con un valor de forma incorrecta. Esto no qued\'o solo en el terreno de la hip\'otesis: tras incorporar deliberadamente \texttt{.catch()} a \texttt{PromiseImpl.js} y \texttt{try/catch} a \texttt{AsyncImpl.js} durante la revisi\'on del grupo -mecanismos de manejo de errores gen\'uinos, que s\'i habr\'ian interceptado un \texttt{reject(...)} o un \texttt{throw}-, el caso l\'imite dise\~nado demostr\'o que ninguno de los dos se activa cuando el problema no es que la promesa falle, sino que tenga \'exito con el dato equivocado: un \texttt{Error} entregado sin validar atraves\'o callbacks, promesas y \texttt{await} -con o sin manejo de errores expl\'icito- sin disparar ninguno de sus respectivos mecanismos. Los m\'etodos funcionales de arreglo (\texttt{reduce}, \texttt{filter}, \texttt{map}, \texttt{find}) reaccionaron de forma previsible ante ese dato corrupto gracias a la sem\'antica de \texttt{NaN} y \texttt{undefined} en JavaScript, pero esa misma previsibilidad es un arma de doble filo: el programa nunca lanz\'o una excepci\'on, s\'olo produjo silenciosamente una respuesta num\'erica incorrecta. La validaci\'on expl\'icita de la forma de un dato as\'incrono, concluimos, no puede delegarse al modelo de ejecuci\'on, al estilo sint\'actico elegido para consumirlo, ni siquiera a un \texttt{try/catch} bien colocado.
+
+\section*{Repositorio}
+El c\'odigo fuente completo de las tres implementaciones, el m\'odulo de post-procesamiento y el caso l\'imite est\'a disponible en: \url{https://github.com/MimDodge/First-Laboratory-Multimedia-Data-Bases-.git}.
+
+\begin{thebibliography}{9}
+\bibitem{lab_enunciado}
+S. A. Reyes G\'omez, ``Laboratorio: Javascript Avanzado,'' Facultad de Ingenier\'ia, Universidad de San Buenaventura, Bogot\'a, Colombia, 2026.
+
+\bibitem{mdn_promise}
+Mozilla Developer Network, ``Promise,'' MDN Web Docs. [En l\'inea]. Disponible: \url{https://developer.mozilla.org/es/docs/Web/JavaScript/Reference/Global_Objects/Promise}
+
+\bibitem{mdn_eventloop}
+Mozilla Developer Network, ``Modelo de concurrencia y bucle de eventos,'' MDN Web Docs. [En l\'inea]. Disponible: \url{https://developer.mozilla.org/es/docs/Web/JavaScript/Event_loop}
+
+\bibitem{ecma_promise}
+Ecma International, ``ECMAScript 2015 Language Specification,'' 6.\textsuperscript{a} ed., Jun. 2015. (Especificaci\'on original de \texttt{Promise}).
+
+\bibitem{ecma_async}
+Ecma International, ``ECMAScript 2017 Language Specification,'' 8.\textsuperscript{a} ed., Jun. 2017. (Especificaci\'on original de \texttt{async}/\texttt{await}).
+
+\bibitem{node_timers}
+OpenJS Foundation, ``Timers,'' Node.js Documentation. [En l\'inea]. Disponible: \url{https://nodejs.org/api/timers.html}
+\end{thebibliography}
+
+\end{document}
